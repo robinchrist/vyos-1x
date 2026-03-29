@@ -28,7 +28,7 @@ from vyos.frrender import get_frrender_dict
 from vyos.template import is_ip
 from vyos.template import is_interface
 from vyos.utils.dict import dict_search
-from vyos.utils.network import get_interface_vrf
+from vyos.utils.network import bgp_as_number_equivalent, get_interface_vrf
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import is_systemd_service_running
 from vyos.utils.process import process_named_running
@@ -126,7 +126,9 @@ def verify_vrflist_import(afi_name: str, afi_config: dict, vrfs_config: dict) ->
             return True
     return False
 
-def verify_remote_as(peer_config, bgp_config):
+
+def get_peer_remote_as(peer_config, bgp_config):
+    """Get remote AS for the neighbor, even if indirectly specified e.g. through peer-group"""
     if 'remote_as' in peer_config:
         return peer_config['remote_as']
 
@@ -257,8 +259,15 @@ def verify(config_dict):
 
                 if 'remote_as' in peer_config:
                     is_ibgp = True
-                    if peer_config['remote_as'] != 'internal' and \
-                            peer_config['remote_as'] != bgp['system_as']:
+                    if peer_config['remote_as'] == 'internal':
+                        is_ibgp = True
+                    # as per the previous logic, remote-as auto results in is_ibgp False
+                    elif peer_config['remote_as'] in (
+                        'external',
+                        'auto',
+                    ) or not bgp_as_number_equivalent(
+                        peer_config['remote_as'], bgp['system_as']
+                    ):
                         is_ibgp = False
 
                     if peer_group not in peer_groups_context:
@@ -278,14 +287,21 @@ def verify(config_dict):
 
                 # Neighbor local-as override can not be the same as the local-as
                 # we use for this BGP instance!
-                asn = list(peer_config['local_as'].keys())[0]
-                if asn == bgp['system_as']:
+                peer_local_as_val = list(peer_config['local_as'].keys())[0]
+                if bgp_as_number_equivalent(peer_local_as_val, bgp['system_as']):
                     raise ConfigError('Cannot have local-as same as system-as number')
 
                 # Neighbor AS specified for local-as and remote-as can not be the same
-                if dict_search('remote_as', peer_config) == asn and neighbor != 'peer_group':
-                     raise ConfigError(f'Neighbor "{peer}" has local-as specified which is '\
-                                        'the same as remote-as, this is not allowed!')
+                peer_remote_as_val = dict_search('remote_as', peer_config)
+                if (
+                    peer_remote_as_val not in (None, 'internal', 'external', 'auto')
+                    and neighbor != 'peer_group'
+                    and bgp_as_number_equivalent(peer_remote_as_val, peer_local_as_val)
+                ):
+                    raise ConfigError(
+                        f'Neighbor "{peer}" has local-as specified which is '
+                        'the same as remote-as, this is not allowed!'
+                    )
 
             # ttl-security and ebgp-multihop can't be used in the same configuration
             if 'ebgp_multihop' in peer_config and 'ttl_security' in peer_config:
@@ -310,7 +326,7 @@ def verify(config_dict):
             if neighbor == 'neighbor':
                 # remote-as must be either set explicitly for the neighbor
                 # or for the entire peer-group
-                if not verify_remote_as(peer_config, bgp):
+                if not get_peer_remote_as(peer_config, bgp):
                     raise ConfigError(f'Neighbor "{peer}" remote-as must be set!')
 
                 if not verify_afi(peer_config, bgp):
@@ -347,9 +363,15 @@ def verify(config_dict):
                         )
                         == {}
                     ):
-                        peer_as = verify_remote_as(peer_config, bgp)
-                        if peer_as != 'internal' and peer_as != bgp['system_as']:
+                        peer_as = get_peer_remote_as(peer_config, bgp)
+                        # peer_as must either be 'internal' or match the system_as
+                        # peer_as should not be None here but better safe than sorry
+                        if peer_as != 'internal' and (
+                            peer_as in (None, 'external', 'auto')
+                            or not bgp_as_number_equivalent(peer_as, bgp['system_as'])
+                        ):
                             raise ConfigError('route-reflector-client only supported for iBGP peers')
+
                     else:
                         # It doesn’t make sense to check the remote-as of a peer group.
                         pass
@@ -372,9 +394,16 @@ def verify(config_dict):
 
             # Local-AS allowed only for EBGP peers
             if 'local_as' in peer_config:
-                remote_as = verify_remote_as(peer_config, bgp)
-                if remote_as == bgp['system_as']:
-                    raise ConfigError(f'local-as configured for "{peer}", allowed only for eBGP peers!')
+                remote_as = get_peer_remote_as(peer_config, bgp)
+                # remote_as should not be None here but better safe than sorry
+                if remote_as != 'external' and (
+                    remote_as in (None, 'auto', 'internal')
+                    or bgp_as_number_equivalent(remote_as, bgp['system_as'])
+                ):
+
+                    raise ConfigError(
+                        f'local-as configured for "{peer}", allowed only for eBGP peers!'
+                    )
 
             for afi in ['ipv4_unicast', 'ipv4_multicast', 'ipv4_labeled_unicast', 'ipv4_flowspec',
                         'ipv6_unicast', 'ipv6_multicast', 'ipv6_labeled_unicast', 'ipv6_flowspec',
@@ -463,7 +492,7 @@ def verify(config_dict):
         if 'peer_group' not in bgp or peer_group not in bgp['peer_group']:
             raise ConfigError(f'Peer-group "{peer_group}" for listen range "{prefix}" does not exist!')
 
-        if not verify_remote_as(bgp['listen']['range'][prefix], bgp):
+        if not get_peer_remote_as(bgp['listen']['range'][prefix], bgp):
             raise ConfigError(f'Peer-group "{peer_group}" requires remote-as to be set!')
 
     # Throw an error if the global administrative distance parameters aren't all filled out.

@@ -7,7 +7,11 @@
     </completionHelp>
     <valueHelp>
       <format>u32:1-4294967294</format>
-      <description>Neighbor AS number</description>
+      <description>Neighbor AS number (asplain)</description>
+    </valueHelp>
+    <valueHelp>
+      <format>&lt;0-65535&gt;.&lt;0-65535&gt;</format>
+      <description>Neighbor AS number (asdot)</description>
     </valueHelp>
     <valueHelp>
       <format>auto</format>
@@ -22,7 +26,7 @@
       <description>Neighbor AS number</description>
     </valueHelp>
     <constraint>
-      <validator name="numeric" argument="--range 1-4294967294"/>
+      <validator name="bgp-as-number"/>
       <regex>(auto|external|internal)</regex>
     </constraint>
     <constraintErrorMessage>Invalid AS number</constraintErrorMessage>

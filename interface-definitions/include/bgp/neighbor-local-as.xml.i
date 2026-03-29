@@ -4,10 +4,14 @@
     <help>Specify alternate ASN for this BGP process</help>
     <valueHelp>
       <format>u32:1-4294967294</format>
-      <description>Autonomous System Number (ASN)</description>
+      <description>Autonomous System Number (asplain)</description>
+    </valueHelp>
+    <valueHelp>
+      <format>&lt;0-65535&gt;.&lt;0-65535&gt;</format>
+      <description>Autonomous System Number (asdot)</description>
     </valueHelp>
     <constraint>
-      <validator name="numeric" argument="--range 1-4294967294"/>
+      <validator name="bgp-as-number"/>
     </constraint>
   </properties>
   <children>

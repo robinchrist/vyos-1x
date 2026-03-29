@@ -721,3 +721,134 @@ def get_interfaces_by_ip(ip_address: str) -> list:
             if addr_info.get('addr') == ip_address:
                 ifaces.append(interface)
     return ifaces
+
+
+# BGP Autonomous System (AS) number helpers
+AS_NUMBER_MIN: int = 1
+AS_NUMBER_MAX: int = 4294967294  # 2^32 - 2  (0 and 4294967295 are reserved)
+
+
+def bgp_parse_asplain(value: str) -> int:
+    """Return AS Number integer value when value is valid in asplain notation (
+    as defined in RFC 5396), otherwise raises ValueError.
+
+    asplain is a single decimal integer in the range 1 - 4294967294.
+    """
+    # Fastest way to check for ^[0-9]+$ instead of heavy regex...
+    if not (value.isascii() and value.isdigit()):
+        raise ValueError('BGP AS number contains invalid characters')
+
+    try:
+        asn = int(value)
+
+        if AS_NUMBER_MIN <= asn <= AS_NUMBER_MAX:
+            return asn
+
+        raise ValueError('BGP AS number is out of range')
+    except ValueError:
+        raise ValueError('BGP AS number is not a valid integer')
+
+
+def bgp_parse_asdot_plus(value: str) -> int:
+    """Return AS Number integer value when value is valid in asdot+ notation(
+    as defined in RFC 5396) otherwise raises ValueError.
+
+    asdot+ notation is X.Y where 0 <= X <= 65535, 0 <= Y <= 65535 and the
+    resulting value X * 65536 + Y is in the range 1 - 4294967294
+    """
+    if value.count('.') != 1:
+        raise ValueError('BGP AS number in asdot+ must contain exactly one dot')
+    left, right = value.split('.')
+
+    # Faster than regex check for ^[0-9]+\\.[0-9]+$
+    if not (left.isascii() and left.isdigit()) or not (
+        right.isascii() and right.isdigit()
+    ):
+        raise ValueError('BGP AS number contains invalid characters')
+
+    try:
+        x = int(left)
+        y = int(right)
+    except ValueError:
+        raise ValueError('BGP AS number in asdot+ must consist of two valid integers')
+
+    if not (0 <= x <= 65535 and 0 <= y <= 65535):
+        raise ValueError('BGP AS number in asdot+ is out of range')
+
+    asn = x * 65536 + y
+
+    if AS_NUMBER_MIN <= asn <= AS_NUMBER_MAX:
+        return asn
+
+    raise ValueError('BGP AS number is out of range')
+
+
+def bgp_parse_as_number(value: str) -> int:
+    """Return AS Number integer value when value is valid in any notation
+    (asplain, asdot, or asdot+) as defined in RFC 5396,
+    otherwise raise ValueError.
+    """
+
+    # "asdot" dispatcher
+    # asdot: small AS numbers as asplain, large AS numbers as asdot+ (dotted notation)
+    # if the AS number contains a dot, it must be in asdot+ notation
+    if "." in value:
+        return bgp_parse_asdot_plus(value)
+    else:
+        return bgp_parse_asplain(value)
+
+
+def bgp_as_get_integer_value(value: str | int) -> int:
+    """Convert a BGP AS number in any notation to a plain integer.
+
+    This is a wrapper around bgp_parse_as_number that also accepts integer
+    input and validates the resulting AS number is within the valid range.
+    """
+    if isinstance(value, int):
+        asn = value
+    else:
+        asn = bgp_parse_as_number(value)
+
+    # Should never happen for string input, but might be for integer input
+    # so we will check it here just in case - better safe than sorry
+    if not (AS_NUMBER_MIN <= asn <= AS_NUMBER_MAX):
+        raise ValueError('BGP AS number is out of range')
+
+    return asn
+
+
+def bgp_format_asplain(value: str | int) -> str:
+    """Convert a BGP AS number in any notation to a plain integer."""
+    asn = bgp_as_get_integer_value(value)
+
+    return f'{asn}'
+
+
+def bgp_format_asdot_plus(value: str | int) -> str:
+    """Convert a BGP AS number in any notation to asdot+ notation.
+
+    asdot+ always uses the ``X.Y`` form, even for AS numbers that fit in
+    16 bits.
+    """
+    asn = bgp_as_get_integer_value(value)
+    x = int(asn // 65536)
+    y = int(asn % 65536)
+    return f'{x}.{y}'
+
+
+def bgp_format_asdot(value: str | int) -> str:
+    """Convert a BGP AS number in any notation to asdot notation.
+
+    For AS numbers that fit in 16 bits (1 - 65535) the result is the asplain.
+    For larger values is asdot+ (dotted notation).
+    """
+    asn = bgp_as_get_integer_value(value)
+    if asn <= 65535:
+        return bgp_format_asplain(asn)
+
+    return bgp_format_asdot_plus(asn)
+
+
+def bgp_as_number_equivalent(as1: str | int, as2: str | int) -> bool:
+    """Check if two BGP AS numbers are equivalent, even if they are in different notations."""
+    return bgp_as_get_integer_value(as1) == bgp_as_get_integer_value(as2)

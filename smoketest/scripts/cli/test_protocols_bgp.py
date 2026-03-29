@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import itertools
 import unittest
 
 from time import sleep
@@ -1208,26 +1209,73 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
     def test_bgp_15_local_as_ebgp(self):
         # https://vyos.dev/T4560
         # local-as allowed only for ebgp peers
+        # Also verify that this check works for mixed AS number formats
 
         neighbor = '192.0.2.99'
-        remote_asn = '500'
-        local_asn = '400'
+        local_as = '400'
 
-        self.cli_set(base_path + ['neighbor', neighbor, 'remote-as', ASN])
-        self.cli_set(base_path + ['neighbor', neighbor, 'local-as', local_asn])
+        # ((system_as, system_as_dot_plus), (remote_as, remote_as_dot_plus))
+        test_cases = [
+            # old test case, both small
+            (('64512', '0.64512'), ('500', '0.500')),
+            # big system as, small remote-as
+            (
+                ('4200000000', '64086.59904'),
+                ('500', '0.500'),
+            ),
+            # small system as, big remote-as
+            (
+                ('64512', '0.64512'),
+                ('4200000000', '64086.59904'),
+            ),
+        ]
 
-        # check validate() - local-as allowed only for ebgp peers
-        with self.assertRaises(ConfigSessionError):
-            self.cli_commit()
+        for test_case in test_cases:
+            # iterate through the cartesian product
+            # this ensures that we test the comparison of AS numbers in both formats
+            # and mixed formats on both sides
+            # results in 8 executions per test_case
+            for system_as, system_as_failing, remote_as in itertools.product(
+                test_case[0], test_case[0], test_case[1]
+            ):
+                with self.subTest(
+                    system_as=system_as,
+                    system_as_failing=system_as_failing,
+                    remote_as=remote_as,
+                ):
+                    self.cli_set(base_path + ['system-as', system_as])
+                    self.cli_set(
+                        base_path
+                        + ['neighbor', neighbor, 'remote-as', system_as_failing]
+                    )
+                    self.cli_set(
+                        base_path + ['neighbor', neighbor, 'local-as', local_as]
+                    )
 
-        self.cli_set(base_path + ['neighbor', neighbor, 'remote-as', remote_asn])
+                    # commit will compare system_as and remote_as and determine that this
+                    # is an iBGP session, thus local-as should not be allowed
+                    # check validate() - local-as allowed only for ebgp peers
+                    with self.assertRaises(ConfigSessionError):
+                        self.cli_commit()
 
-        self.cli_commit()
+                    self.cli_set(
+                        base_path + ['neighbor', neighbor, 'remote-as', remote_as]
+                    )
 
-        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
-        self.assertIn(f'router bgp {ASN}', frrconfig)
-        self.assertIn(f' neighbor {neighbor} remote-as {remote_asn}', frrconfig)
-        self.assertIn(f' neighbor {neighbor} local-as {local_asn}', frrconfig)
+                    self.cli_commit()
+
+                    frrconfig = self.getFRRconfig(
+                        f'router bgp {system_as}', stop_section='^exit'
+                    )
+                    self.assertIn(f'router bgp {system_as}', frrconfig)
+                    self.assertIn(
+                        f' neighbor {neighbor} remote-as {remote_as}', frrconfig
+                    )
+                    self.assertIn(
+                        f' neighbor {neighbor} local-as {local_as}', frrconfig
+                    )
+
+                    self.cli_delete(base_path)
 
     def test_bgp_16_import_rd_rt_compatibility(self):
         # Verify if import vrf and rd vpn export
@@ -1454,49 +1502,118 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         int_neighbors = ['192.0.2.2', '192.0.2.3', '192.0.2.4', '192.0.2.5']
         int_interfaces = ['dum0', 'dum1', 'dum2', 'dum3']
         int_pg_names = ['SMOKETESTINT0', 'SMOKETESTINT1', 'SMOKETESTINT2']
-        remote_as_types = ['external', 'internal']
+        system_as_cases = [ASN, '123.456']
+        remote_as_cases = ['external', '64086.59904', 'internal']
         for int_interface in int_interfaces:
             self.cli_set(['interfaces', 'dummy', int_interface])
         self.cli_commit()
 
-        def _set_neighbor_0(neighbor, remote_as_type):
+        def _set_neighbor_0(neighbor, remote_as_val):
             # set route-reflector-client in neighbor and set remote-as in peer_group
             interface_cmd = ['interface'] if neighbor.startswith('dum') else []
-            self.cli_set(base_path + ['peer-group', int_pg_names[0], 'remote-as', remote_as_type])
-            self.cli_set(base_path + ['neighbor', neighbor, 'address-family', 'ipv4-unicast', 'route-reflector-client'])
-            self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['peer-group', int_pg_names[0]])
+            self.cli_set(
+                base_path + ['peer-group', int_pg_names[0], 'remote-as', remote_as_val]
+            )
+            self.cli_set(
+                base_path
+                + [
+                    'neighbor',
+                    neighbor,
+                    'address-family',
+                    'ipv4-unicast',
+                    'route-reflector-client',
+                ]
+            )
+            self.cli_set(
+                base_path
+                + ['neighbor', neighbor]
+                + interface_cmd
+                + ['peer-group', int_pg_names[0]]
+            )
 
-        def _set_neighbor_1(neighbor, remote_as_type):
+        def _set_neighbor_1(neighbor, remote_as_val):
             # set route-reflector-client in peer_group and set remote-as in neighbor
             interface_cmd = ['interface'] if neighbor.startswith('dum') else []
-            self.cli_set(base_path + ['peer-group', int_pg_names[1], 'address-family', 'ipv4-unicast', 'route-reflector-client'])
-            self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['remote-as', remote_as_type])
-            self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['peer-group', int_pg_names[1]])
+            self.cli_set(
+                base_path
+                + [
+                    'peer-group',
+                    int_pg_names[1],
+                    'address-family',
+                    'ipv4-unicast',
+                    'route-reflector-client',
+                ]
+            )
+            self.cli_set(
+                base_path
+                + ['neighbor', neighbor]
+                + interface_cmd
+                + ['remote-as', remote_as_val]
+            )
+            self.cli_set(
+                base_path
+                + ['neighbor', neighbor]
+                + interface_cmd
+                + ['peer-group', int_pg_names[1]]
+            )
 
-        def _set_neighbor_2(neighbor, remote_as_type):
+        def _set_neighbor_2(neighbor, remote_as_val):
             # set route-reflector-client and remote-as in peer_group
             interface_cmd = ['interface'] if neighbor.startswith('dum') else []
-            self.cli_set(base_path + ['peer-group', int_pg_names[2], 'remote-as', remote_as_type])
-            self.cli_set(base_path + ['peer-group', int_pg_names[2], 'address-family', 'ipv4-unicast', 'route-reflector-client'])
-            self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['peer-group', int_pg_names[2]])
+            self.cli_set(
+                base_path + ['peer-group', int_pg_names[2], 'remote-as', remote_as_val]
+            )
+            self.cli_set(
+                base_path
+                + [
+                    'peer-group',
+                    int_pg_names[2],
+                    'address-family',
+                    'ipv4-unicast',
+                    'route-reflector-client',
+                ]
+            )
+            self.cli_set(
+                base_path
+                + ['neighbor', neighbor]
+                + interface_cmd
+                + ['peer-group', int_pg_names[2]]
+            )
 
-        def _set_neighbor_3(neighbor, remote_as_type):
+        def _set_neighbor_3(neighbor, remote_as_val):
             # set route-reflector-client and remote-as in neighbor
             interface_cmd = ['interface'] if neighbor.startswith('dum') else []
-            self.cli_set(base_path + ['neighbor', neighbor, 'address-family', 'ipv4-unicast', 'route-reflector-client'])
-            self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['remote-as', remote_as_type])
+            self.cli_set(
+                base_path
+                + [
+                    'neighbor',
+                    neighbor,
+                    'address-family',
+                    'ipv4-unicast',
+                    'route-reflector-client',
+                ]
+            )
+            self.cli_set(
+                base_path
+                + ['neighbor', neighbor]
+                + interface_cmd
+                + ['remote-as', remote_as_val]
+            )
 
         set_neighbor_funcs = [_set_neighbor_0, _set_neighbor_1, _set_neighbor_2, _set_neighbor_3]
-        for remote_as_type in remote_as_types:
-            for func_count, set_neighbor_func in enumerate(set_neighbor_funcs):
-                for neighbors in [int_neighbors, int_interfaces]:
-                    set_neighbor_func(neighbors[func_count], remote_as_type)
-                    if remote_as_type == 'external':
-                        with self.assertRaises(ConfigSessionError) as e:
+        for system_as_val in system_as_cases:
+            self.cli_set(base_path + ['system-as', system_as_val])
+
+            for remote_as_val in remote_as_cases:
+                for func_count, set_neighbor_func in enumerate(set_neighbor_funcs):
+                    for neighbors in [int_neighbors, int_interfaces]:
+                        set_neighbor_func(neighbors[func_count], remote_as_val)
+                        if remote_as_val != 'internal':
+                            with self.assertRaises(ConfigSessionError) as e:
+                                self.cli_commit()
+                            self.cli_discard()
+                        else:
                             self.cli_commit()
-                        self.cli_discard()
-                    else:
-                        self.cli_commit()
 
         frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit', start_subsection=' address-family ipv4 unicast', stop_subsection='^ exit-address-family')
         neighbor_has_rr_client = [
@@ -1637,6 +1754,68 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         self.assertIn(f'router bgp {ASN} vrf {vrf}', frr_vrf_config)
         self.assertIn(f' bgp router-id {router_id}', frr_vrf_config)
 
+
+    def test_bgp_32_asdot_in_config(self):
+        # Verify BGP AS number dot (asdot) notation is accepted for system-as,
+        # neighbor remote-as and neighbor local-as, and that invalid values are
+        # rejected by the validator.
+        #
+        # asdot encoding: X.Y  =>  X * 65536 + Y
+        #   1.0   = 65536
+        #   1.100 = 65636
+        #   1.200 = 65736
+
+        asdot_system_as = '64087.123'  # 4200005755
+        asdot_remote_as = '65000.65000'  # 4259905000
+        asdot_local_as = '64123.12345'  # 4202377273
+        neighbor_v4 = '192.0.2.50'
+        router_id = '10.0.0.1'
+
+        invalid_as_numbers = [
+            '65536.0',  # left part exceeds 65535
+            '1.65536',  # right part exceeds 65535
+            '65535.65536',  # both parts at max but right part exceeds 65535
+            '65536.-999999',  # left part exceeds 65535 but sum would be a valid AS number
+            '0.0',  # encodes AS 0 which is reserved and out of range
+            '1.-1',  # negative right part
+            '-1.1',  # negative left part
+            'abc.def',  # non-numeric
+            '1.2.3',  # too many parts
+            '0',  # AS 0 is reserved and out of range
+            '4294967295',  # exceeds max AS number 4294967294
+            '5000000000',  # exceeds 32 bit max
+        ]
+
+        # Basic Test First: Simple config with asdot system-as, neighbor remote-as and local-as
+        # IPv4 eBGP neighbor with asdot remote-as, local-as
+        self.cli_set(base_path + ['system-as', asdot_system_as])
+        self.cli_set(base_path + ['parameters', 'router-id', router_id])
+
+        self.cli_set(
+            base_path + ['neighbor', neighbor_v4, 'remote-as', asdot_remote_as]
+        )
+        self.cli_set(base_path + ['neighbor', neighbor_v4, 'local-as', asdot_local_as])
+
+        self.cli_commit()
+
+        frrconfig = self.getFRRconfig(
+            f'router bgp {asdot_system_as}', stop_section='^exit'
+        )
+        self.assertIn(f'router bgp {asdot_system_as}', frrconfig)
+        self.assertIn(f' bgp router-id {router_id}', frrconfig)
+        self.assertIn(f' neighbor {neighbor_v4} remote-as {asdot_remote_as}', frrconfig)
+        self.assertIn(f' neighbor {neighbor_v4} local-as {asdot_local_as}', frrconfig)
+
+        # Test invalid AS numbers are rejected
+        self.cli_delete(base_path + ['neighbor', neighbor_v4])
+
+        for invalid_as in invalid_as_numbers:
+            # Should already be rejected by the validator when setting
+            with self.assertRaises(ConfigSessionError):
+                self.cli_set(base_path + ['system-as', invalid_as])
+
+            self.cli_set(base_path + ['system-as', asdot_system_as])  # restore
+            self.cli_commit()
 
     def test_bgp_99_bmp(self):
         target_name = 'instance-bmp'
